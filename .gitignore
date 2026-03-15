@@ -1,6 +1,7 @@
 # Rust
 /target/
 **/target/
+tokitai-ipc-tool/target/
 
 # CMake
 /build/
