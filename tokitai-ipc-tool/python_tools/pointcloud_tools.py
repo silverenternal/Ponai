@@ -6,6 +6,7 @@ Python 点云工具服务 - 通过 IPC 与 Rust 通信
 import sys
 import json
 import os
+import tempfile
 from typing import Any, Dict, Optional
 import numpy as np
 import open3d as o3d
@@ -13,6 +14,12 @@ import open3d as o3d
 # 全局点云数据管理（线程不安全，生产环境可改用类封装）
 _point_cloud_data: Optional[o3d.geometry.PointCloud] = None
 _point_cloud_info: Dict[str, Any] = {}
+# 临时文件路径，用于与 instance_seg_tools.py 共享点云数据
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_TEMP_DIR = os.path.join(_PROJECT_ROOT, "tmp")
+_TEMP_PCD_PATH = os.path.join(_TEMP_DIR, "lidar_ai_current_pcd.npy")
+os.makedirs(_TEMP_DIR, exist_ok=True)
+
 # LAS 格式支持（需额外安装 laspy）
 try:
     import laspy
@@ -71,6 +78,8 @@ def load_point_cloud(file_path: str) -> dict:
             "bbox_max": points.max(axis=0).tolist(),
             "bbox_size": (points.max(axis=0) - points.min(axis=0)).tolist()
         })
+
+        np.save(_TEMP_PCD_PATH, np.asarray(_point_cloud_data.points))
 
         return {
             "message": f"成功加载点云文件：{file_path}",
@@ -163,6 +172,8 @@ def downsample(voxel_size: float) -> dict:
         _point_cloud_info["num_points"] = new_points
         _point_cloud_info["downsampled"] = True
         _point_cloud_info["voxel_size"] = voxel_size
+
+        np.save(_TEMP_PCD_PATH, np.asarray(_point_cloud_data.points))
 
         return {
             "message": f"降采样完成（体素大小: {voxel_size}）",
@@ -257,6 +268,8 @@ def remove_outliers(nb_neighbors: int, std_ratio: float) -> dict:
         # 更新全局信息
         _point_cloud_info["num_points"] = new_points
         _point_cloud_info["outliers_removed"] = True
+
+        np.save(_TEMP_PCD_PATH, np.asarray(_point_cloud_data.points))
 
         return {
             "message": f"离群点移除完成",
