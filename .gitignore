@@ -29,3 +29,8 @@ __pycache__/
 *.swp
 *.swo
 *~
+
+tmp/
+*.npy
+__pycache__/
+*.pyc
