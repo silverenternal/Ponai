@@ -19,6 +19,7 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _TEMP_DIR = os.path.join(_PROJECT_ROOT, "tmp")
 _TEMP_PCD_PATH = os.path.join(_TEMP_DIR, "lidar_ai_current_pcd.npy")
 os.makedirs(_TEMP_DIR, exist_ok=True)
+
 # LAS 格式支持（需额外安装 laspy）
 try:
     import laspy
