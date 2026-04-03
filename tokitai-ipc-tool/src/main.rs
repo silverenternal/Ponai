@@ -1,9 +1,9 @@
 //! 3D 点云车机应用 - 主程序示例
 //!
-//! 演示如何使用 AI 调度层和点云工具层
+//! 演示如何使用 AI 调度层、点云工具层和实例分割工具层
 
 use lidar_ai_studio::{
-    AiScheduler, AiSchedulerConfig, LidarAiError, PointCloudToolManager,
+    AiScheduler, AiSchedulerConfig, InstanceSegToolManager, LidarAiError, PointCloudToolManager,
 };
 use tokitai::ToolProvider;
 
@@ -56,7 +56,7 @@ async fn main() -> Result<(), LidarAiError> {
     println!("   ✓ AI 调度器已配置（Ollama: localhost:11434）");
     println!("   ✓ 工具已注册到 AI 调度器\n");
 
-    // ==================== 4. 演示工具调用 ====================
+    // ==================== 4. 演示点云工具调用 ====================
     println!("4. 演示点云工具调用...");
 
     // 加载点云
@@ -65,101 +65,80 @@ async fn main() -> Result<(), LidarAiError> {
         Err(e) => println!("   加载点云（模拟）：{}", e),
     }
 
-    // 获取点云信息
-    match tools.get_point_cloud_info() {
-        Ok(result) => println!("   点云信息：{}", result),
-        Err(e) => println!("   点云信息（模拟）：{}", e),
-    }
-
     // 降采样
     match tools.downsample(0.05) {
         Ok(result) => println!("   降采样：{}", result),
         Err(e) => println!("   降采样（模拟）：{}", e),
     }
 
-    // 法线估计
-    match tools.estimate_normals(20) {
-        Ok(result) => println!("   法线估计：{}", result),
-        Err(e) => println!("   法线估计（模拟）：{}", e),
+    println!();
+
+    // ==================== 5. 实例分割工具演示 ====================
+    println!("5. 实例分割工具演示...");
+
+    // 创建实例分割工具管理器（IPC 模式）
+    let mut seg_tools = InstanceSegToolManager::new_ipc("python_tools/instance_seg_tools.py")?;
+    println!("   ✓ 实例分割工具已加载（IPC 模式）");
+
+    // 获取后端信息
+    match seg_tools.get_backend_info() {
+        Ok(info) => println!("   后端信息：{}", info),
+        Err(e) => println!("   后端信息：{}", e),
     }
 
-    // 离群点移除
-    match tools.remove_outliers(30, 2.0) {
-        Ok(result) => println!("   离群点移除：{}", result),
-        Err(e) => println!("   离群点移除（模拟）：{}", e),
-    }
+    // 演示切换到 HTTP 模式
+    println!("\n   演示切换到 HTTP 后端...");
+    seg_tools.switch_to_http("http://localhost:8080", None, 30);
+    println!("   ✓ 当前后端：{}", seg_tools.current_backend());
 
-    // 平面分割
-    match tools.segment_plane(0.2, 1000) {
-        Ok(result) => println!("   平面分割：{}", result),
-        Err(e) => println!("   平面分割（模拟）：{}", e),
-    }
+    // 切换回 IPC
+    println!("\n   切换回 IPC 后端...");
+    seg_tools.switch_to_ipc("python_tools/instance_seg_tools.py")?;
+    println!("   ✓ 当前后端：{}", seg_tools.current_backend());
 
-    // 欧式聚类
-    match tools.euclidean_clustering(0.5, 100, 10000) {
-        Ok(result) => println!("   欧式聚类：{}", result),
-        Err(e) => println!("   欧式聚类（模拟）：{}", e),
+    // 演示动态切换 API
+    println!("\n   使用 switch_backend API 切换...");
+    match seg_tools.switch_backend("http".to_string(), Some("http://gpu-server:8080".to_string())) {
+        Ok(msg) => println!("   {}", msg),
+        Err(e) => println!("   切换失败：{}", e),
     }
-
-    // 保存点云
-    match tools.save_point_cloud("/data/output.pcd".to_string()) {
-        Ok(result) => println!("   保存点云：{}", result),
-        Err(e) => println!("   保存点云（模拟）：{}", e),
+    match seg_tools.switch_backend("ipc".to_string(), None) {
+        Ok(msg) => println!("   {}", msg),
+        Err(e) => println!("   切换失败：{}", e),
     }
 
     println!();
 
-    // ==================== 5. AI 调度演示 ====================
-    println!("5. AI 调度演示（需要 Ollama 服务）...");
+    // ==================== 6. AI 调度演示 ====================
+    println!("6. AI 调度演示（需要 Ollama 服务）...");
     println!("   注意：此步骤需要本地运行 Ollama 服务");
     println!("   启动命令：ollama serve");
     println!();
 
-    // 以下是 AI 调度的示例代码（需要 Ollama 服务）
-    //
-    // let user_message = "帮我加载点云文件并进行降采样和平面分割";
-    // println!("用户：{}", user_message);
-    //
-    // // AI 理解并决定调用哪些工具
-    // let response = scheduler.chat(user_message).await?;
-    //
-    // if let Some(tool_calls) = response.tool_calls {
-    //     for tool_call in tool_calls {
-    //         println!("AI 请求调用工具：{}", tool_call.function.name);
-    //
-    //         // 执行工具调用
-    //         let result = execute_tool_call(&tools, &tool_call).await?;
-    //
-    //         // 将结果返回给 AI
-    //         let final_response = scheduler
-    //             .process_tool_result(&tool_call, result)
-    //             .await?;
-    //
-    //         println!("AI 响应：{}", final_response.content);
-    //     }
-    // }
-
     println!("   ✓ 框架已就绪，等待 Ollama 服务...");
     println!();
 
-    // ==================== 6. 跨语言 IPC 说明 ====================
-    println!("=== 跨语言 IPC 架构说明 ===");
+    // ==================== 7. 跨语言 IPC 说明 ====================
+    println!("=== 跨语言 IPC/HTTP 双模式架构 ===");
     println!();
-    println!("本框架通过 stdin/stdout JSON Lines 实现跨语言工具调用：");
+    println!("本框架支持两种后端调用模式，可通过 Switch 机制无缝切换：");
     println!();
-    println!("┌─────────────┐      JSON       ┌─────────────┐");
-    println!("│   Rust      │ ◄─────────────► │   Python    │");
-    println!("│  (tokitai)  │   stdin/stdout  │  (Open3D)   │");
-    println!("└─────────────┘                 └─────────────┘");
-    println!("      │                               │");
-    println!("      ▼                               ▼");
-    println!("┌─────────────┐                 ┌─────────────┐");
-    println!("│  AI 调度层   │                 │  点云算法   │");
-    println!("│  (Ollama)   │                 │  (待实现)   │");
-    println!("└─────────────┘                 └─────────────┘");
+    println!("┌─────────────────────────────────────────────────────────┐");
+    println!("│                  InstanceSegToolManager                 │");
+    println!("│  ┌───────────────────────────────────────────────────┐  │");
+    println!("│  │              BackendSwitch (切换器)               │  │");
+    println!("│  │  ┌─────────────┐      ┌─────────────┐            │  │");
+    println!("│  │  │ IPC Backend │      │ HTTP Backend│            │  │");
+    println!("│  │  │  (本地)     │      │  (网络)     │            │  │");
+    println!("│  │  └─────────────┘      └─────────────┘            │  │");
+    println!("│  └───────────────────────────────────────────────────┘  │");
+    println!("└─────────────────────────────────────────────────────────┘");
     println!();
-    println!("请求格式：{{\"tool\": \"tool_name\", \"args\": {{...}}}}");
-    println!("响应格式：{{\"result\": {{...}}, \"error\": null}}");
+    println!("模式对比:");
+    println!("  IPC 模式：低延迟，无需网络，适合本地开发");
+    println!("  HTTP 模式：可远程部署到 GPU 服务器，支持负载均衡");
+    println!();
+    println!("启动 HTTP 服务：cd python_tools && ./start_server.sh");
     println!();
 
     Ok(())

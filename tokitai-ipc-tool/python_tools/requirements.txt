@@ -1,0 +1,13 @@
+# Python dependencies for PointPillars inference
+numpy==1.26.4
+onnxruntime>=1.15.0
+onnx>=1.14.0
+fastapi>=0.100.0
+uvicorn>=0.23.0
+scipy>=1.11.0
+
+# Optional: for MMDetection3D support (requires Python 3.11)
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# pip install mmcv==2.2.0 -f https://download.openmmlab.com/mmcv/dist/cu121/torch2.4/index.html
+# pip install mmengine mmdet
+# pip install mmdetection3d/ --no-build-isolation --no-deps

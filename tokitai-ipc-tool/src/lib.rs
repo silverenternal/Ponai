@@ -30,11 +30,15 @@
 //! ```
 
 pub mod ai_scheduler;
+pub mod backend_switch;
 pub mod error;
+pub mod instance_seg_tools;
 pub mod ipc;
 pub mod pointcloud_tools;
 pub mod tools;
 
 pub use ai_scheduler::{AiScheduler, AiSchedulerConfig};
+pub use backend_switch::BackendSwitch;
 pub use error::{LidarAiError, Result};
+pub use instance_seg_tools::InstanceSegToolManager;
 pub use pointcloud_tools::PointCloudToolManager;

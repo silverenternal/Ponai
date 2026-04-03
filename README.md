@@ -4,6 +4,8 @@
 
 基于 **tokitai** 库构建，通过 IPC（进程间通信）实现 Rust AI 调度层与 Python/C++ 点云处理工具的无缝集成。
 
+> 📚 **完整文档**: 查看 [`tokitai-ipc-tool/docs/PROJECT_DOCUMENTATION.md`](./tokitai-ipc-tool/docs/PROJECT_DOCUMENTATION.md)
+
 ## 架构设计
 
 ```

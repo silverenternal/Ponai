@@ -20,13 +20,19 @@ pub enum LidarAiError {
     AiScheduler(String),
 
     #[error("HTTP 请求错误：{0}")]
-    Http(#[from] reqwest::Error),
+    Http(String),
 
     #[error("配置错误：{0}")]
     Config(String),
 
     #[error("Tokitai 工具错误：{0}")]
     Tool(#[from] tokitai::ToolError),
+}
+
+impl From<reqwest::Error> for LidarAiError {
+    fn from(err: reqwest::Error) -> Self {
+        LidarAiError::Http(err.to_string())
+    }
 }
 
 pub type Result<T> = std::result::Result<T, LidarAiError>;

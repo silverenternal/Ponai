@@ -1,0 +1,21 @@
+# 点云处理基础依赖
+# 注意：Open3D 暂不支持 Python 3.14
+# 方案 1: 使用系统包管理器安装 Open3D (推荐)
+#   Arch Linux: sudo pacman -S python-open3d
+#   然后将 open3d 复制到虚拟环境或使用 --system-site-packages
+#
+# 方案 2: 使用 pyenv 安装 Python 3.11 或 3.12 创建专用虚拟环境
+
+numpy>=1.24.0
+
+# ONNX Runtime (CPU 推理)
+onnxruntime>=1.15.0
+
+# GPU 版本（如果需要 GPU 加速，用这行替换上面）
+# onnxruntime-gpu>=1.15.0
+
+# PyTorch（可选，训练/调试用）
+# torch>=2.0.0
+
+# PCL Python 绑定（可选，Open3D 的替代）
+# python-pcl

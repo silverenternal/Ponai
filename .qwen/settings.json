@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo *)",
+      "Bash(python3 *)",
+      "Bash(pkg-config *)",
+      "Bash(pip install *)",
+      "Bash(pacman *)",
+      "Bash(chmod *)",
+      "Bash(wget *)",
+      "Bash(curl *)",
+      "Bash(rm *)",
+      "Bash(cat *)",
+      "Bash(python *)",
+      "Bash(git clone *)",
+      "Bash(ls *)",
+      "Bash(pip list)",
+      "Bash(pip uninstall *)",
+      "Bash(python3.11 *)",
+      "Bash(source *)",
+      "Bash(git add *)",
+      "Bash(git reset *)"
+    ]
+  },
+  "$version": 3
+}
