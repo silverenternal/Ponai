@@ -56,172 +56,107 @@
 
 ---
 
-## 2. 核心设计
-
-### 2.1 BackendSwitch 设计
+## 2.1 BackendSwitch 设计
 
 ```rust
-/// 后端类型枚举
-#[derive(Debug, Clone, PartialEq)]
-pub enum BackendType {
-    /// 本地 IPC 进程调用
-    Ipc,
-    /// 网络 HTTP 调用
-    Http,
-}
-
-/// 后端配置
-#[derive(Debug, Clone)]
-pub enum BackendConfig {
-    Ipc {
-        script_path: String,
-    },
-    Http {
-        base_url: String,
-        api_key: Option<String>,
-        timeout_secs: u64,
-    },
-}
-
-/// 后端切换器
+/// 后端切换器 - 核心组件
+///
+/// 使用策略模式，允许在运行时动态切换不同的后端实现
+///
+/// # 线程安全
+///
+/// `BackendSwitch` 使用 `Arc<RwLock<Box<dyn Backend>>>` 实现：
+/// - 读操作（`call_tool`）：共享锁，支持并发
+/// - 写操作（`switch_to_*`）：独占锁，阻塞其他操作
+///
+/// # 性能说明
+///
+/// 多个 `BackendSwitch` clone 共享同一个后端实例。
+/// 切换后端会影响所有 clone 的实例。
 pub struct BackendSwitch {
-    backend_type: BackendType,
-    ipc_runner: Option<IpcToolRunner>,
-    http_client: Option<reqwest::Client>,
-    http_config: Option<HttpConfig>,
+    inner: Arc<RwLock<BackendSwitchInner>>,
 }
 
-#[derive(Debug, Clone)]
-pub struct HttpConfig {
-    base_url: String,
-    api_key: Option<String>,
-    timeout_secs: u64,
+struct BackendSwitchInner {
+    backend_type: BackendType,
+    backend: Box<dyn Backend>,
 }
 
 impl BackendSwitch {
     /// 创建 IPC 后端
-    pub fn new_ipc(script_path: &str) -> Result<Self, LidarAiError> {
-        let runner = IpcToolRunner::new_python(script_path)?;
+    pub fn new_ipc(script_path: &str) -> Result<Self> {
+        let backend = IpcBackend::new_python(script_path)?;
+        let boxed_backend: Box<dyn Backend> = Box::new(backend);
+        
         Ok(Self {
-            backend_type: BackendType::Ipc,
-            ipc_runner: Some(runner),
-            http_client: None,
-            http_config: None,
+            inner: Arc::new(RwLock::new(BackendSwitchInner {
+                backend_type: BackendType::Ipc,
+                backend: boxed_backend,
+            })),
         })
     }
 
     /// 创建 HTTP 后端
     pub fn new_http(base_url: &str, api_key: Option<String>, timeout_secs: u64) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(timeout_secs))
-            .build()
-            .unwrap_or_default();
-
+        let backend = HttpBackend::new(base_url, api_key, timeout_secs);
+        let boxed_backend: Box<dyn Backend> = Box::new(backend);
+        
         Self {
-            backend_type: BackendType::Http,
-            ipc_runner: None,
-            http_client: Some(client),
-            http_config: Some(HttpConfig {
-                base_url: base_url.to_string(),
-                api_key,
-                timeout_secs,
-            }),
+            inner: Arc::new(RwLock::new(BackendSwitchInner {
+                backend_type: BackendType::Http,
+                backend: boxed_backend,
+            })),
         }
     }
 
     /// 动态切换到 IPC 后端
-    pub fn switch_to_ipc(&mut self, script_path: &str) -> Result<(), LidarAiError> {
-        let runner = IpcToolRunner::new_python(script_path)?;
-        self.ipc_runner = Some(runner);
-        self.backend_type = BackendType::Ipc;
-        tracing::info!("已切换到 IPC 后端：{}", script_path);
+    pub fn switch_to_ipc(&mut self, script_path: &str) -> Result<()> {
+        let backend = IpcBackend::new_python(script_path)?;
+        let boxed_backend: Box<dyn Backend> = Box::new(backend);
+        
+        let mut inner = self.inner.write().map_err(|e| {
+            LidarAiError::IpcCommunication(format!("锁获取失败（锁中毒）: {}", e))
+        })?;
+        
+        inner.backend = boxed_backend;
+        inner.backend_type = BackendType::Ipc;
         Ok(())
     }
 
     /// 动态切换到 HTTP 后端
-    pub fn switch_to_http(&mut self, base_url: &str, api_key: Option<String>, timeout_secs: u64) {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(timeout_secs))
-            .build()
-            .unwrap_or_default();
-
-        self.http_client = Some(client);
-        self.http_config = Some(HttpConfig {
-            base_url: base_url.to_string(),
-            api_key,
-            timeout_secs,
-        });
-        self.backend_type = BackendType::Http;
-        tracing::info!("已切换到 HTTP 后端：{}", base_url);
+    pub fn switch_to_http(&mut self, base_url: &str, api_key: Option<String>, timeout_secs: u64) -> Result<()> {
+        let backend = HttpBackend::new(base_url, api_key, timeout_secs);
+        let boxed_backend: Box<dyn Backend> = Box::new(backend);
+        
+        let mut inner = self.inner.write().map_err(|e| {
+            LidarAiError::IpcCommunication(format!("锁获取失败（锁中毒）: {}", e))
+        })?;
+        
+        inner.backend = boxed_backend;
+        inner.backend_type = BackendType::Http;
+        Ok(())
     }
 
     /// 获取当前后端类型
-    pub fn current_backend(&self) -> &BackendType {
-        &self.backend_type
+    pub fn current_backend(&self) -> BackendType {
+        let inner = self.inner.read().unwrap();
+        inner.backend_type.clone()
     }
 
     /// 通用工具调用（自动路由到对应后端）
-    pub fn call_tool(&self, tool_name: &str, args: Value) -> Result<Value, LidarAiError> {
-        match &self.backend_type {
-            BackendType::Ipc => {
-                let runner = self.ipc_runner.as_ref()
-                    .ok_or_else(|| LidarAiError::IpcCommunication("IPC runner not initialized".to_string()))?;
-                runner.call_tool(tool_name, args)
-            }
-            BackendType::Http => {
-                let client = self.http_client.as_ref()
-                    .ok_or_else(|| LidarAiError::Http("HTTP client not initialized".to_string()))?;
-                let config = self.http_config.as_ref()
-                    .ok_or_else(|| LidarAiError::Config("HTTP config not initialized".to_string()))?;
-                
-                // HTTP 调用逻辑
-                self.call_http_tool(client, config, tool_name, args)
-            }
-        }
-    }
-
-    /// HTTP 工具调用实现
-    fn call_http_tool(
-        &self,
-        client: &reqwest::Client,
-        config: &HttpConfig,
-        tool_name: &str,
-        args: Value,
-    ) -> Result<Value, LidarAiError> {
-        let url = format!("{}/api/v1/{}", config.base_url, tool_name);
-        
-        let mut request = client.post(&url).json(&json!({
-            "args": args
-        }));
-
-        // 添加 API Key（如果有）
-        if let Some(ref api_key) = config.api_key {
-            request = request.header("Authorization", format!("Bearer {}", api_key));
-        }
-
-        // 发送请求
-        let response = futures::executor::block_on(request.send())
-            .map_err(|e| LidarAiError::Http(format!("HTTP 请求失败：{}", e)))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = futures::executor::block_on(response.text())
-                .unwrap_or_default();
-            return Err(LidarAiError::Http(format!("HTTP {}: {}", status, error_text)));
-        }
-
-        // 解析响应
-        let api_response: ApiResponse = futures::executor::block_on(response.json())
-            .map_err(|e| LidarAiError::Json(e))?;
-
-        if let Some(error) = api_response.error {
-            return Err(LidarAiError::ToolExecution(error));
-        }
-
-        Ok(api_response.result.unwrap_or(Value::Null))
+    pub fn call_tool(&self, tool_name: &str, args: Value) -> Result<Value> {
+        let inner = self.inner.read().unwrap();
+        inner.backend.call_tool(tool_name, args)
     }
 }
 ```
+
+**架构说明**：
+
+- **旧架构**：`Arc<Mutex<Arc<Mutex<T>>>>` 嵌套锁（已废弃）
+- **新架构**：`Arc<RwLock<Box<dyn Backend>>>` 单锁，读写分离
+- **并发性能**：读操作（`call_tool`）支持并发，写操作（`switch_to_*`）独占锁
+- **Clone 语义**：多个 `BackendSwitch` clone 共享同一个后端实例
 
 ---
 

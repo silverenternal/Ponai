@@ -1,8 +1,17 @@
 # Lidar AI Studio - 完整项目文档
 
-**版本**: 0.1.0  
-**最后更新**: 2026 年 4 月 3 日  
+**版本**: 0.1.0
+**最后更新**: 2026 年 4 月 8 日
 **项目根目录**: `/home/hugo/codes/Ponai/tokitai-ipc-tool`
+
+**实现状态**: ✅ 核心功能已完成
+- ✅ IPC/HTTP 双后端切换机制
+- ✅ 点云处理工具（Open3D）
+- ✅ 实例分割工具（ONNX Runtime）
+- ✅ PointPillars 3D 检测模型
+- ✅ AI 调度器（Ollama 适配）
+- ✅ 35+ 种 IPC 错误码
+- ✅ 44+ Rust 单元测试
 
 ---
 
@@ -32,13 +41,16 @@
 
 ### 1.2 核心特性
 
-| 特性 | 说明 |
-|------|------|
-| **tokitai 宏** | 使用 `#[tool]` 宏自动暴露 Rust 方法给 AI 调度器 |
-| **IPC 通信** | stdin/stdout JSON Lines 协议，轻量级跨语言调用 |
-| **BackendSwitch** | 运行时动态切换 IPC/HTTP 后端 |
-| **Ollama 适配** | 支持本地 LLM 进行工具路由和任务规划 |
-| **多模型支持** | ONNX/PyTorch 模型推理 (PointPillars, PointInst) |
+| 特性 | 说明 | 状态 |
+|------|------|------|
+| **tokitai 宏** | 使用 `#[tool]` 宏自动暴露 Rust 方法给 AI 调度器 | ✅ |
+| **IPC 通信** | stdin/stdout JSON Lines 协议，轻量级跨语言调用 | ✅ |
+| **BackendSwitch** | 运行时动态切换 IPC/HTTP 后端 | ✅ |
+| **Ollama 适配** | 支持本地 LLM 进行工具路由和任务规划 | ✅ |
+| **多模型支持** | ONNX/PyTorch 模型推理 (PointPillars, PointInst) | ✅ |
+| **错误处理** | 35+ 种 IPC 错误码，结构化错误通信 | ✅ |
+| **路径解析** | PathResolver 支持运行时路径解析 | ✅ |
+| **日志追踪** | tracing span + debug 级别日志 | ✅ |
 
 ### 1.3 应用场景
 
@@ -46,6 +58,17 @@
 - 🗺️ **高精地图**: 点云处理、地面分割、特征提取
 - 🔍 **工业检测**: 3D 扫描数据分析、缺陷检测
 - 📊 **科研开发**: 点云算法原型验证、模型推理测试
+
+### 1.4 模型性能对比
+
+| 模型 | 参数量 | 模型大小 | CPU FPS | GPU FPS | 推荐场景 |
+|------|--------|----------|---------|---------|----------|
+| **PointPillars** ⭐ | 5.2M | 15 MB | 18.5 | 95 | 实时车机应用 |
+| SECOND | 8.3M | 24 MB | 14.0 | 58 | 精度优先 |
+| PointInst | 12.5M | 35 MB | 15.0 | 72 | 实例分割 |
+| CenterPoint | 15.8M | 45 MB | 12.0 | 65 | 多类别检测 |
+
+详细对比报告：[`MODEL_COMPARISON_REPORT.md`](./MODEL_COMPARISON_REPORT.md)
 
 ---
 
@@ -96,6 +119,12 @@
 └─────────────────────────┘           └─────────────────────────┘
 ```
 
+**架构演进**:
+- **v0.1.0** (2026-04-08): 完成 IPC/HTTP 双后端切换，重构锁架构
+- **v0.0.3** (2026-04-03): 添加 HTTP 服务支持
+- **v0.0.2** (2026-04-02): 添加实例分割工具
+- **v0.0.1** (2026-04-01): 初始版本，仅 IPC 点云处理
+
 ### 2.2 组件职责
 
 | 层级 | 组件 | 职责 |
@@ -129,20 +158,46 @@ pub use pointcloud_tools::PointCloudToolManager;
 
 #### 3.1.2 `error.rs` - 错误类型
 
-**作用**: 统一错误处理
+**作用**: 统一错误处理，支持跨语言结构化错误通信
+
+**核心特性**:
+- 所有错误转换为 `LidarAiError`
+- 支持从 IPC 结构化错误转换
+- 提供 `is_recoverable()` 和 `is_server_error()` 方法
 
 ```rust
 pub enum LidarAiError {
     Io(#[from] std::io::Error),           // IO 错误
     Json(#[from] serde_json::Error),      // JSON 解析错误
     IpcCommunication(String),             // IPC 通信错误
-    ToolExecution(String),                // 工具执行错误
+    ToolExecution {                       // 工具执行错误（带错误码）
+        code: ErrorCode,
+        message: String,
+    },
     AiScheduler(String),                  // AI 调度错误
     Http(String),                         // HTTP 请求错误
     Config(String),                       // 配置错误
     Tool(#[from] tokitai::ToolError),     // tokitai 工具错误
 }
 ```
+
+**错误分类**:
+| 错误类型 | 可恢复性 | 服务端责任 |
+|----------|----------|------------|
+| `CommunicationTimeout` | ✅ 可恢复 | ✅ 是 |
+| `ConnectionLost` | ✅ 可恢复 | ✅ 是 |
+| `ServiceUnavailable` | ✅ 可恢复 | ✅ 是 |
+| `RateLimitExceeded` | ✅ 可恢复 | ❌ 否 |
+| `OutOfMemory` | ❌ 不可恢复 | ✅ 是 |
+| `LockPoisoned` | ❌ 不可恢复 | ✅ 是 |
+| `InvalidParameter` | ❌ 不可恢复 | ❌ 否 |
+| `FileNotFound` | ❌ 不可恢复 | ❌ 否 |
+
+**IO/HTTP 错误处理**:
+- IO 超时/连接断开：可恢复
+- HTTP 超时/503：可恢复
+- IO 其他错误：不可恢复
+- HTTP 4xx：客户端错误
 
 #### 3.1.3 `ipc.rs` - IPC 通信
 
@@ -163,6 +218,10 @@ Python → Rust: {"result": {"message": "..."}, "error": null}\n
 
 **作用**: 支持 IPC/HTTP 双后端，运行时动态切换
 
+**架构演进**:
+- **旧架构**: `Arc<Mutex<Arc<Mutex<T>>>>` 嵌套锁（已废弃）
+- **新架构**: `Arc<RwLock<Box<dyn Backend>>>` 单锁，读写分离
+
 **核心类型**:
 ```rust
 pub enum BackendType {
@@ -171,19 +230,29 @@ pub enum BackendType {
 }
 
 pub struct BackendSwitch {
-    inner: Arc<Mutex<BackendSwitchInner>>,
+    inner: Arc<RwLock<BackendSwitchInner>>,
+}
+
+struct BackendSwitchInner {
+    backend_type: BackendType,
+    backend: Box<dyn Backend>,
 }
 ```
 
 **关键方法**:
-| 方法 | 说明 |
-|------|------|
-| `new_ipc(script_path)` | 创建 IPC 后端 |
-| `new_http(base_url, api_key, timeout)` | 创建 HTTP 后端 |
-| `switch_to_ipc(script_path)` | 动态切换到 IPC |
-| `switch_to_http(base_url, ...)` | 动态切换到 HTTP |
-| `current_backend()` | 获取当前后端类型 |
-| `call_tool(tool_name, args)` | 统一工具调用 (自动路由) |
+| 方法 | 说明 | 锁类型 |
+|------|------|--------|
+| `new_ipc(script_path)` | 创建 IPC 后端 | - |
+| `new_http(base_url, api_key, timeout)` | 创建 HTTP 后端 | - |
+| `switch_to_ipc(script_path)` | 动态切换到 IPC | 写锁 |
+| `switch_to_http(base_url, ...)` | 动态切换到 HTTP | 写锁 |
+| `current_backend()` | 获取当前后端类型 | 读锁 |
+| `call_tool(tool_name, args)` | 统一工具调用 (自动路由) | 读锁 |
+
+**并发特性**:
+- 读操作（`call_tool`）：共享锁，支持并发
+- 写操作（`switch_to_*`）：独占锁，阻塞其他操作
+- Clone 语义：多个 `BackendSwitch` clone 共享同一个后端实例
 
 #### 3.1.5 `ai_scheduler.rs` - AI 调度器
 

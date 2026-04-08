@@ -8,6 +8,7 @@ use tokitai::ToolError;
 
 use crate::error::LidarAiError;
 use crate::ipc::IpcToolRunner;
+use crate::ipc_error::ErrorCode;
 
 /// 点云工具管理器
 pub struct PointCloudToolManager {
@@ -39,14 +40,20 @@ impl PointCloudToolManager {
     fn python(&self) -> Result<&IpcToolRunner, LidarAiError> {
         self.python_runner
             .as_ref()
-            .ok_or_else(|| LidarAiError::ToolExecution("Python 工具未初始化".to_string()))
+            .ok_or_else(|| LidarAiError::ToolExecution {
+                code: ErrorCode::InternalError,
+                message: "Python 工具未初始化".to_string(),
+            })
     }
 
     /// 获取 C++ runner
     fn cpp(&self) -> Result<&IpcToolRunner, LidarAiError> {
         self.cpp_runner
             .as_ref()
-            .ok_or_else(|| LidarAiError::ToolExecution("C++ 工具未初始化".to_string()))
+            .ok_or_else(|| LidarAiError::ToolExecution {
+                code: ErrorCode::InternalError,
+                message: "C++ 工具未初始化".to_string(),
+            })
     }
 
     /// 通用工具调用方法
@@ -54,10 +61,10 @@ impl PointCloudToolManager {
         match backend {
             "python" => self.python()?.call_tool(tool_name, args),
             "cpp" => self.cpp()?.call_tool(tool_name, args),
-            _ => Err(LidarAiError::ToolExecution(format!(
-                "未知的后端：{}",
-                backend
-            ))),
+            _ => Err(LidarAiError::ToolExecution {
+                code: ErrorCode::InvalidParameter,
+                message: format!("未知的后端：{}", backend),
+            }),
         }
     }
 }

@@ -7,6 +7,9 @@ use lidar_ai_studio::{
 };
 use tokitai::ToolProvider;
 
+// 使用 env! 宏获取项目根目录
+const PROJECT_ROOT: &str = env!("CARGO_MANIFEST_DIR");
+
 #[tokio::main]
 async fn main() -> Result<(), LidarAiError> {
     // 初始化日志
@@ -21,8 +24,9 @@ async fn main() -> Result<(), LidarAiError> {
 
     // ==================== 1. 初始化点云工具层 ====================
     println!("1. 初始化点云工具层...");
-    let tools = PointCloudToolManager::new_python("python_tools/pointcloud_tools.py")?;
-    println!("   ✓ Python 点云工具已加载\n");
+    let python_script = format!("{}/python_tools/pointcloud_tools.py", PROJECT_ROOT);
+    let tools = PointCloudToolManager::new_python(&python_script)?;
+    println!("   ✓ Python 点云工具已加载：{}\n", python_script);
 
     // ==================== 2. 获取工具定义 ====================
     println!("2. 获取工具定义（用于 AI 调用）...");
@@ -77,8 +81,9 @@ async fn main() -> Result<(), LidarAiError> {
     println!("5. 实例分割工具演示...");
 
     // 创建实例分割工具管理器（IPC 模式）
-    let mut seg_tools = InstanceSegToolManager::new_ipc("python_tools/instance_seg_tools.py")?;
-    println!("   ✓ 实例分割工具已加载（IPC 模式）");
+    let seg_script = format!("{}/python_tools/instance_seg_tools.py", PROJECT_ROOT);
+    let mut seg_tools = InstanceSegToolManager::new_ipc(&seg_script)?;
+    println!("   ✓ 实例分割工具已加载（IPC 模式）：{}", seg_script);
 
     // 获取后端信息
     match seg_tools.get_backend_info() {
@@ -88,12 +93,12 @@ async fn main() -> Result<(), LidarAiError> {
 
     // 演示切换到 HTTP 模式
     println!("\n   演示切换到 HTTP 后端...");
-    seg_tools.switch_to_http("http://localhost:8080", None, 30);
+    seg_tools.switch_to_http("http://localhost:8080", None, 30)?;
     println!("   ✓ 当前后端：{}", seg_tools.current_backend());
 
     // 切换回 IPC
     println!("\n   切换回 IPC 后端...");
-    seg_tools.switch_to_ipc("python_tools/instance_seg_tools.py")?;
+    seg_tools.switch_to_ipc(&seg_script)?;
     println!("   ✓ 当前后端：{}", seg_tools.current_backend());
 
     // 演示动态切换 API

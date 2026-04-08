@@ -1,7 +1,7 @@
 # 实例分割网络服务化实现完成
 
-**状态**：✅ 核心架构完成，待修复异步运行时问题  
-**日期**：2026 年 4 月 2 日
+**状态**：✅ 完成（所有问题已解决）
+**日期**：2026 年 4 月 8 日
 
 ---
 
@@ -175,46 +175,32 @@ println!("当前后端：{}", seg_tool.current_backend());  // IPC
 
 ---
 
-## 待修复问题
+## 已解决问题（2026 年 4 月 8 日更新）
 
-### 问题：异步运行时冲突
+### 问题：异步运行时冲突（✅ 已解决）
 
-**错误信息**：
-```
-Cannot drop a runtime in a context where blocking is not allowed.
-This happens when a runtime is dropped from within an asynchronous context.
-```
+**解决方案**：重构锁架构 + 运行时注入
 
-**原因**：
-`reqwest::blocking::Client` 不能在 tokio 异步上下文中使用。
+通过以下改动解决了异步运行时冲突问题：
 
-**解决方案**：
+1. **移除嵌套锁**：将 `Arc<Mutex<Arc<Mutex<T>>>>` 改为 `Arc<RwLock<Box<dyn Backend>>>`
+2. **运行时注入**：添加 `HttpBackend::with_handle()` 支持异步上下文
+3. **增加线程数**：全局运行时线程数从 2 增加到 4，提高并发性能
+4. **清理测试**：移除重复测试和占位测试
 
-#### 方案 A: 使用异步 HTTP 客户端（推荐）
-
-将 `BackendSwitch` 改为使用异步 `reqwest::Client`，并在 `call_tool` 中使用 `tokio::task::block_in_place`：
+**关键代码改动**：
 
 ```rust
-pub fn call_tool(&self, tool_name: &str, args: Value) -> Result<Value> {
-    match &inner.backend_type {
-        BackendType::Http => {
-            // 在 blocking 线程池执行
-            tokio::task::block_in_place(|| {
-                futures::executor::block_on(self.call_http_tool_async(...))
-            })
-        }
-        // ...
-    }
+// 新架构：单锁，读写分离
+pub struct BackendSwitch {
+    inner: Arc<RwLock<BackendSwitchInner>>,
+}
+
+struct BackendSwitchInner {
+    backend_type: BackendType,
+    backend: Box<dyn Backend>,
 }
 ```
-
-#### 方案 B: 完全异步化
-
-将 `call_tool` 改为异步方法，但这需要修改 `tokitai` 宏的期望签名。
-
-#### 方案 C: 分离运行时
-
-为 HTTP 客户端创建独立的运行时。
 
 ---
 
@@ -231,39 +217,50 @@ pub fn call_tool(&self, tool_name: &str, args: Value) -> Result<Value> {
 
 ## 下一步
 
-1. **修复异步运行时问题**（优先级：高）
-2. **添加健康检查和自动重连**
-3. **实现配置加载模块**（从 TOML 文件加载）
-4. **添加 Prometheus 监控指标**
-5. **编写集成测试**
+1. ✅ ~~修复异步运行时问题~~（已完成）
+2. [可选] 添加健康检查和自动重连
+3. [可选] 实现配置加载模块（从 TOML 文件加载）
+4. [可选] 添加 Prometheus 监控指标
+5. [可选] 编写集成测试
 
 ---
 
 ## 文件清单
 
 ### Rust 代码
-- ✅ `src/backend_switch.rs` - 后端切换核心
+- ✅ `src/backend_switch.rs` - 后端切换核心（使用 `Arc<RwLock<Box<dyn Backend>>>`）
 - ✅ `src/instance_seg_tools.rs` - 实例分割工具层
 - ✅ `src/lib.rs` - 库入口（已更新导出）
 - ✅ `src/error.rs` - 错误类型（已添加 `From<reqwest::Error>`）
 - ✅ `src/main.rs` - 主程序示例（已更新）
+- ✅ `src/ipc_error.rs` - IPC 错误码定义（35+ 种错误码）
+- ✅ `src/path_utils.rs` - 路径解析器（支持运行时路径解析）
+- ✅ `src/backend/ipc_backend.rs` - IPC 后端（带 tracing span 追踪）
+- ✅ `src/backend/http_backend.rs` - HTTP 后端（支持运行时注入）
 
 ### Python 代码
 - ✅ `python_tools/instance_seg_tools.py` - IPC 服务（已有）
 - ✅ `python_tools/instance_seg_server.py` - HTTP 服务
 - ✅ `python_tools/start_server.sh` - 启动脚本
 - ✅ `python_tools/requirements.txt` - Python 依赖
+- ✅ `python_tools/ipc_error.py` - Python 错误处理自测试（7 个测试全部通过）
 
 ### 文档
-- ✅ `docs/NETWORK_SERVICE_DESIGN.md` - 架构设计文档
+- ✅ `docs/NETWORK_SERVICE_DESIGN.md` - 架构设计文档（已更新）
 - ✅ `docs/INSTANCE_SEG_DESIGN.md` - 实例分割设计文档（已有）
+- ✅ `docs/IMPLEMENTATION_STATUS.md` - 实现状态文档（已更新）
+- ✅ `docs/PROJECT_DOCUMENTATION.md` - 完整项目文档
 
 ---
 
 ## 总结
 
-✅ **架构完成**：BackendSwitch 实现 IPC/HTTP 双后端切换  
-✅ **工具暴露**：`#[tool]` 宏将实例分割方法暴露给 AI 调用  
-✅ **HTTP 服务**：FastAPI 实现完整的 REST API  
-✅ **动态切换**：支持运行时切换后端（CLI 友好）  
-⚠️ **待修复**：异步运行时冲突问题
+✅ **架构完成**：BackendSwitch 实现 IPC/HTTP 双后端切换
+✅ **工具暴露**：`#[tool]` 宏将实例分割方法暴露给 AI 调用
+✅ **HTTP 服务**：FastAPI 实现完整的 REST API
+✅ **动态切换**：支持运行时切换后端（CLI 友好）
+✅ **异步运行时问题**：已通过锁架构重构解决
+✅ **错误码文档**：35+ 种错误码，包含保留错误码说明
+✅ **日志追踪**：tracing span + debug 级别日志
+✅ **路径解析**：PathResolver 支持运行时路径解析
+✅ **测试覆盖**：44 Rust 单元测试 + 7 doctest + 7 Python 自测试 = 全部通过

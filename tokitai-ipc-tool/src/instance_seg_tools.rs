@@ -7,7 +7,7 @@ use tokitai::tool;
 use tokitai::ToolError;
 
 use crate::backend_switch::BackendSwitch;
-use crate::backend_switch::BackendType;
+use crate::backend::BackendType;
 use crate::error::LidarAiError;
 
 /// 实例分割工具管理器
@@ -34,8 +34,8 @@ impl InstanceSegToolManager {
     }
 
     /// 切换到 HTTP 后端
-    pub fn switch_to_http(&mut self, base_url: &str, api_key: Option<String>, timeout_secs: u64) {
-        self.switch.switch_to_http(base_url, api_key, timeout_secs);
+    pub fn switch_to_http(&mut self, base_url: &str, api_key: Option<String>, timeout_secs: u64) -> std::result::Result<(), LidarAiError> {
+        self.switch.switch_to_http(base_url, api_key, timeout_secs)
     }
 
     /// 获取当前后端类型
@@ -130,7 +130,8 @@ impl InstanceSegToolManager {
             "http" => {
                 let url = config.unwrap_or_else(|| "http://localhost:8080".to_string());
                 let mut switch = self.switch.clone();
-                switch.switch_to_http(&url, None, 30);
+                switch.switch_to_http(&url, None, 30)
+                    .map_err(|e| ToolError::validation_error(e.to_string()))?;
                 Ok(format!("✓ 已切换到 HTTP 后端：{}", url))
             }
             _ => Err(ToolError::validation_error(format!("未知的后端类型：{}", backend_type))),

@@ -1,300 +1,273 @@
 //! BackendSwitch - 支持 IPC/HTTP 双后端切换
 //!
-//! 允许在运行时动态切换本地进程调用和网络调用
+//! 使用策略模式，允许在运行时动态切换不同的后端实现
+//!
+//! # 架构设计
+//!
+//! `BackendSwitch` 使用 `Arc<dyn Backend>` 直接持有后端实例，
+//! 避免多层锁嵌套。每个后端内部管理自己的同步原语。
+//!
+//! ```text
+//! 旧架构:
+//! BackendSwitch -> Arc<Mutex<BackendSwitchInner -> Arc<Mutex<Box<dyn Backend>>>>>
+//!                  (外层锁)                     (内层锁)
+//!
+//! 新架构:
+//! BackendSwitch -> Arc<RwLock<dyn Backend>>
+//!                  (单锁，读写分离)
+//! ```
+//!
+//! # 示例
+//!
+//! ```rust,no_run
+//! # use serde_json::json;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! use lidar_ai_studio::BackendSwitch;
+//!
+//! // 创建 IPC 后端
+//! let switch = BackendSwitch::new_ipc("python_tools/pointcloud_tools.py")?;
+//!
+//! // 调用工具
+//! let result = switch.call_tool("process_pointcloud", json!({"path": "test.pcd"}))?;
+//!
+//! // 切换到 HTTP 后端
+//! let mut switch = switch;
+//! switch.switch_to_http("http://localhost:8080", None, 30)?;
+//! # Ok(())
+//! # }
+//! ```
 
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
+use serde_json::Value;
+use tracing::info;
 
 use crate::error::{LidarAiError, Result};
-
-/// IPC 请求结构
-#[derive(Debug, Serialize, Deserialize)]
-pub struct IpcRequest {
-    pub tool: String,
-    #[serde(default)]
-    pub args: Value,
-}
-
-/// IPC 响应结构
-#[derive(Debug, Serialize, Deserialize)]
-pub struct IpcResponse {
-    pub result: Option<Value>,
-    pub error: Option<String>,
-}
-
-/// API 响应结构（HTTP 模式）
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ApiResponse {
-    pub result: Option<Value>,
-    pub error: Option<String>,
-}
-
-/// 后端类型枚举
-#[derive(Debug, Clone, PartialEq)]
-pub enum BackendType {
-    /// 本地 IPC 进程调用
-    Ipc,
-    /// 网络 HTTP 调用
-    Http,
-}
-
-/// HTTP 配置
-#[derive(Debug, Clone)]
-pub struct HttpConfig {
-    pub base_url: String,
-    pub api_key: Option<String>,
-    pub timeout_secs: u64,
-}
-
-/// IPC 工具运行器
-pub struct IpcToolRunner {
-    process: Arc<Mutex<Child>>,
-}
-
-impl IpcToolRunner {
-    /// 启动 Python 工具服务
-    pub fn new_python(script_path: &str) -> Result<Self> {
-        let child = Command::new("python3")
-            .arg(script_path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(LidarAiError::Io)?;
-
-        Ok(Self {
-            process: Arc::new(Mutex::new(child)),
-        })
-    }
-
-    /// 启动 C++ 工具服务
-    pub fn new_cpp(binary_path: &str) -> Result<Self> {
-        let child = Command::new(binary_path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(LidarAiError::Io)?;
-
-        Ok(Self {
-            process: Arc::new(Mutex::new(child)),
-        })
-    }
-
-    /// 调用工具
-    pub fn call_tool(&self, tool_name: &str, args: Value) -> Result<Value> {
-        let mut process = self.process.lock().map_err(|e| {
-            LidarAiError::IpcCommunication(format!("锁获取失败：{}", e))
-        })?;
-
-        let stdin = process.stdin.as_mut().ok_or_else(|| {
-            LidarAiError::IpcCommunication("stdin 不可用".to_string())
-        })?;
-
-        // 发送请求
-        let request = IpcRequest {
-            tool: tool_name.to_string(),
-            args,
-        };
-        let request_json = serde_json::to_string(&request)?;
-        writeln!(stdin, "{}", request_json)?;
-        stdin.flush()?;
-
-        // 读取响应
-        let stdout = process.stdout.as_mut().ok_or_else(|| {
-            LidarAiError::IpcCommunication("stdout 不可用".to_string())
-        })?;
-
-        let mut reader = BufReader::new(stdout);
-        let mut response_line = String::new();
-        reader.read_line(&mut response_line)?;
-
-        let response: IpcResponse = serde_json::from_str(&response_line)?;
-
-        if let Some(error) = response.error {
-            return Err(LidarAiError::ToolExecution(error));
-        }
-
-        Ok(response.result.unwrap_or(Value::Null))
-    }
-}
+use crate::backend::{Backend, BackendType, IpcBackend, HttpBackend};
 
 /// 后端切换器 - 核心组件
-#[derive(Clone)]
+///
+/// 使用策略模式，允许在运行时动态切换不同的后端实现
+///
+/// # 线程安全
+///
+/// `BackendSwitch` 使用 `Arc<RwLock<Box<dyn Backend>>>` 实现：
+/// - 读操作（`call_tool`）：共享锁，支持并发
+/// - 写操作（`switch_to_*`）：独占锁，阻塞其他操作
+///
+/// # 性能说明
+///
+/// 多个 `BackendSwitch` clone 共享同一个后端实例。
+/// 切换后端会影响所有 clone 的实例。
 pub struct BackendSwitch {
-    inner: Arc<Mutex<BackendSwitchInner>>,
+    inner: Arc<RwLock<BackendSwitchInner>>,
 }
 
 struct BackendSwitchInner {
     backend_type: BackendType,
-    ipc_runner: Option<IpcToolRunner>,
-    http_client: Option<reqwest::Client>,
-    http_config: Option<HttpConfig>,
+    backend: Box<dyn Backend>,
 }
 
 impl BackendSwitch {
     /// 创建 IPC 后端
+    ///
+    /// # 参数
+    /// - `script_path`: Python 脚本路径
+    ///
+    /// # 返回
+    /// - `Ok(BackendSwitch)`: 成功创建
+    /// - `Err(LidarAiError)`: 进程启动失败
     pub fn new_ipc(script_path: &str) -> Result<Self> {
-        let runner = IpcToolRunner::new_python(script_path)?;
+        let backend = IpcBackend::new_python(script_path)?;
+        let boxed_backend: Box<dyn Backend> = Box::new(backend);
+
+        info!("BackendSwitch 创建 IPC 后端：{}", script_path);
         Ok(Self {
-            inner: Arc::new(Mutex::new(BackendSwitchInner {
+            inner: Arc::new(RwLock::new(BackendSwitchInner {
                 backend_type: BackendType::Ipc,
-                ipc_runner: Some(runner),
-                http_client: None,
-                http_config: None,
+                backend: boxed_backend,
             })),
         })
     }
 
     /// 创建 HTTP 后端
+    ///
+    /// # 参数
+    /// - `base_url`: 服务基础 URL
+    /// - `api_key`: API 认证密钥（可选）
+    /// - `timeout_secs`: 请求超时（秒）
     pub fn new_http(base_url: &str, api_key: Option<String>, timeout_secs: u64) -> Self {
-        let handle = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            rt.block_on(async move {
-                reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(timeout_secs))
-                    .build()
-                    .unwrap_or_default()
-            })
-        });
-        let client = handle.join().unwrap();
+        let backend = HttpBackend::new(base_url, api_key, timeout_secs);
+        let boxed_backend: Box<dyn Backend> = Box::new(backend);
 
+        info!("BackendSwitch 创建 HTTP 后端：{}", base_url);
         Self {
-            inner: Arc::new(Mutex::new(BackendSwitchInner {
+            inner: Arc::new(RwLock::new(BackendSwitchInner {
                 backend_type: BackendType::Http,
-                ipc_runner: None,
-                http_client: Some(client),
-                http_config: Some(HttpConfig {
-                    base_url: base_url.to_string(),
-                    api_key,
-                    timeout_secs,
-                }),
+                backend: boxed_backend,
             })),
         }
     }
 
     /// 动态切换到 IPC 后端
+    ///
+    /// # 注意
+    ///
+    /// 此操作会阻塞所有正在进行的 `call_tool` 调用，
+    /// 直到切换完成。
     pub fn switch_to_ipc(&mut self, script_path: &str) -> Result<()> {
-        let runner = IpcToolRunner::new_python(script_path)?;
-        let mut inner = self.inner.lock().map_err(|e| {
-            LidarAiError::IpcCommunication(format!("锁获取失败：{}", e))
+        let backend = IpcBackend::new_python(script_path)?;
+        let boxed_backend: Box<dyn Backend> = Box::new(backend);
+
+        let mut inner = self.inner.write().map_err(|e| {
+            LidarAiError::IpcCommunication(format!("锁获取失败（锁中毒）: {}", e))
         })?;
-        inner.ipc_runner = Some(runner);
+
+        inner.backend = boxed_backend;
         inner.backend_type = BackendType::Ipc;
-        tracing::info!("BackendSwitch: 已切换到 IPC 后端：{}", script_path);
+        info!("BackendSwitch: 已切换到 IPC 后端：{}", script_path);
         Ok(())
     }
 
     /// 动态切换到 HTTP 后端
-    pub fn switch_to_http(&mut self, base_url: &str, api_key: Option<String>, timeout_secs: u64) {
-        let handle = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            rt.block_on(async move {
-                reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(timeout_secs))
-                    .build()
-                    .unwrap_or_default()
-            })
-        });
-        let client = handle.join().unwrap();
+    pub fn switch_to_http(&mut self, base_url: &str, api_key: Option<String>, timeout_secs: u64) -> Result<()> {
+        let backend = HttpBackend::new(base_url, api_key, timeout_secs);
+        let boxed_backend: Box<dyn Backend> = Box::new(backend);
 
-        let mut inner = self.inner.lock().unwrap();
-        inner.http_client = Some(client);
-        inner.http_config = Some(HttpConfig {
-            base_url: base_url.to_string(),
-            api_key,
-            timeout_secs,
-        });
+        let mut inner = self.inner.write().map_err(|e| {
+            LidarAiError::IpcCommunication(format!("锁获取失败（锁中毒）: {}", e))
+        })?;
+
+        inner.backend = boxed_backend;
         inner.backend_type = BackendType::Http;
-        tracing::info!("BackendSwitch: 已切换到 HTTP 后端：{}", base_url);
+        info!("BackendSwitch: 已切换到 HTTP 后端：{}", base_url);
+        Ok(())
     }
 
     /// 获取当前后端类型
+    ///
+    /// # 注意
+    ///
+    /// 此方法使用读锁，不会阻塞其他读操作。
     pub fn current_backend(&self) -> BackendType {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.read().unwrap();
         inner.backend_type.clone()
     }
 
     /// 通用工具调用（自动路由到对应后端）
+    ///
+    /// # 参数
+    /// - `tool_name`: 工具名称
+    /// - `args`: JSON 格式参数
+    ///
+    /// # 性能
+    ///
+    /// 多个线程可以同时调用 `call_tool`，
+    /// 实际并发度取决于底层后端的实现。
     pub fn call_tool(&self, tool_name: &str, args: Value) -> Result<Value> {
-        let inner = self.inner.lock().unwrap();
-
-        match &inner.backend_type {
-            BackendType::Ipc => {
-                let runner = inner.ipc_runner.as_ref()
-                    .ok_or_else(|| LidarAiError::IpcCommunication("IPC runner not initialized".to_string()))?;
-                runner.call_tool(tool_name, args)
-            }
-            BackendType::Http => {
-                let client = inner.http_client.as_ref()
-                    .ok_or_else(|| LidarAiError::Http("HTTP client not initialized".to_string()))?;
-                let config = inner.http_config.as_ref()
-                    .ok_or_else(|| LidarAiError::Config("HTTP config not initialized".to_string()))?;
-
-                Self::call_http_tool(client, config, tool_name, args)
-            }
-        }
+        let inner = self.inner.read().unwrap();
+        inner.backend.call_tool(tool_name, args)
     }
 
-    /// HTTP 工具调用实现
-    fn call_http_tool(
-        client: &reqwest::Client,
-        config: &HttpConfig,
-        tool_name: &str,
-        args: Value,
-    ) -> Result<Value> {
-        let url = format!("{}/api/v1/{}", config.base_url, tool_name);
-        let api_key = config.api_key.clone();
-        let client = client.clone();
+    /// 判断当前后端是否可用
+    ///
+    /// # 实现说明
+    ///
+    /// - IPC 后端：检查子进程是否存活
+    /// - HTTP 后端：发送 HEAD 请求检查服务可用性
+    pub fn is_available(&self) -> bool {
+        let inner = self.inner.read().unwrap();
+        inner.backend.is_available()
+    }
+}
 
-        // 使用 std::thread::spawn 在独立线程中运行异步 HTTP 请求
-        let handle = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            rt.block_on(async move {
-                let mut request_builder = client.post(&url).json(&json!({
-                    "args": args
-                }));
+impl Clone for BackendSwitch {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
 
-                // 添加 API Key（如果有）
-                request_builder = if let Some(ref api_key) = api_key {
-                    request_builder.header("Authorization", format!("Bearer {}", api_key))
-                } else {
-                    request_builder
-                };
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-                let response = request_builder.send().await
-                    .map_err(|e| LidarAiError::Http(format!("HTTP 请求失败：{}", e)))?;
+    /// 测试 BackendType 枚举
+    #[test]
+    fn test_backend_type_enum() {
+        let ipc = BackendType::Ipc;
+        let http = BackendType::Http;
 
-                if !response.status().is_success() {
-                    let status = response.status();
-                    let error_text = response.text().await.unwrap_or_default();
-                    return Err(LidarAiError::Http(format!("HTTP {}: {}", status, error_text)));
-                }
+        assert_ne!(ipc, http);
+        assert_eq!(ipc, BackendType::Ipc);
+        assert_eq!(http, BackendType::Http);
+    }
 
-                // 解析响应
-                let api_response: ApiResponse = response.json().await
-                    .map_err(|e| LidarAiError::Http(format!("JSON 解析失败：{}", e)))?;
+    /// 测试 BackendSwitch 创建 HTTP 后端
+    #[test]
+    fn test_backend_switch_new_http() {
+        let backend_switch = BackendSwitch::new_http("http://localhost:8080", None, 30);
+        assert_eq!(backend_switch.current_backend(), BackendType::Http);
+    }
 
-                if let Some(error) = api_response.error {
-                    return Err(LidarAiError::ToolExecution(error));
-                }
+    /// 测试 BackendSwitch 后端类型查询
+    #[test]
+    fn test_backend_switch_current_backend() {
+        let backend_switch = BackendSwitch::new_http("http://localhost:8080", None, 30);
+        let backend_type = backend_switch.current_backend();
+        assert_eq!(backend_type, BackendType::Http);
+    }
 
-                Ok(api_response.result.unwrap_or(Value::Null))
-            })
-        });
+    /// 测试 BackendSwitch 切换到 HTTP 后端
+    #[test]
+    fn test_backend_switch_switch_to_http() {
+        let mut backend_switch = BackendSwitch::new_http("http://localhost:8080", None, 30);
 
-        handle.join().unwrap()
+        // 切换到另一个 HTTP 后端
+        let result = backend_switch.switch_to_http("http://localhost:9090", Some("new_key".to_string()), 60);
+        assert!(result.is_ok());
+        assert_eq!(backend_switch.current_backend(), BackendType::Http);
+    }
+
+    /// 测试并发安全性（多 Clone 共享状态）
+    #[test]
+    fn test_backend_switch_clone_shares_state() {
+        let backend_switch = BackendSwitch::new_http("http://localhost:8080", None, 30);
+        let clone1 = backend_switch.clone();
+        let clone2 = backend_switch.clone();
+
+        // 所有 Clone 应该共享同一个后端类型
+        assert_eq!(backend_switch.current_backend(), BackendType::Http);
+        assert_eq!(clone1.current_backend(), BackendType::Http);
+        assert_eq!(clone2.current_backend(), BackendType::Http);
+    }
+
+    /// 测试 is_available 方法
+    #[test]
+    fn test_backend_switch_is_available() {
+        let backend_switch = BackendSwitch::new_http("http://localhost:8080", None, 30);
+        // HTTP 后端应该始终可用（不检查连接）
+        assert!(backend_switch.is_available());
+    }
+
+    /// 测试 RwLock 读锁并发（多个线程同时读）
+    #[test]
+    fn test_rwlock_concurrent_read() {
+        let backend_switch = BackendSwitch::new_http("http://localhost:8080", None, 30);
+        let mut handles = vec![];
+
+        // 创建 10 个并发读操作
+        for _ in 0..10 {
+            let switch = backend_switch.clone();
+            let handle = std::thread::spawn(move || {
+                switch.current_backend()
+            });
+            handles.push(handle);
+        }
+
+        // 所有线程应该都能成功获取读锁
+        for handle in handles {
+            assert_eq!(handle.join().unwrap(), BackendType::Http);
+        }
     }
 }

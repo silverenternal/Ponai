@@ -11,6 +11,9 @@ from typing import Any, Dict, Optional
 import numpy as np
 import open3d as o3d
 
+# 导入统一的错误类型
+from ipc_error import IpcError, ErrorCode, create_error_response, create_success_response
+
 # 全局点云数据管理（线程不安全，生产环境可改用类封装）
 _point_cloud_data: Optional[o3d.geometry.PointCloud] = None
 _point_cloud_info: Dict[str, Any] = {}
@@ -35,11 +38,11 @@ def load_point_cloud(file_path: str) -> dict:
     :return: 加载结果字典（JSON 可序列化）
     """
     global _point_cloud_data, _point_cloud_info
-    
+
     # 基础校验
     if not os.path.exists(file_path):
-        return {"error": f"文件不存在: {file_path}"}
-    
+        return create_error_response(IpcError.file_not_found(file_path))
+
     file_ext = file_path.split(".")[-1].lower()
     _point_cloud_info = {
         "file_path": file_path,
@@ -63,9 +66,17 @@ def load_point_cloud(file_path: str) -> dict:
                 colors = np.vstack((las.red, las.green, las.blue)).T / 65535.0
                 _point_cloud_data.colors = o3d.utility.Vector3dVector(colors)
         elif file_ext == "las" and not LAS_SUPPORT:
-            return {"error": "LAS 格式需要安装 laspy: pip install laspy[laszip]"}
+            return create_error_response(
+                IpcError(
+                    ErrorCode.FILE_FORMAT_UNSUPPORTED,
+                    "LAS 格式需要安装 laspy: pip install laspy[laszip]",
+                    {"format": "las", "missing_dependency": "laspy"}
+                )
+            )
         else:
-            return {"error": f"不支持的文件格式: {file_ext}，仅支持 PCD/PLY/LAS"}
+            return create_error_response(
+                IpcError.file_format_unsupported(file_ext)
+            )
 
         # 更新点云基础信息
         points = np.asarray(_point_cloud_data.points)
@@ -81,13 +92,19 @@ def load_point_cloud(file_path: str) -> dict:
 
         np.save(_TEMP_PCD_PATH, np.asarray(_point_cloud_data.points))
 
-        return {
+        return create_success_response({
             "message": f"成功加载点云文件：{file_path}",
             "info": _point_cloud_info
-        }
+        })
 
     except Exception as e:
-        return {"error": f"加载失败: {str(e)}"}
+        return create_error_response(
+            IpcError(
+                ErrorCode.FILE_READ_ERROR,
+                f"加载失败：{str(e)}",
+                {"file_path": file_path, "exception": str(e)}
+            )
+        )
 
 
 def get_point_cloud_info() -> dict:
@@ -98,10 +115,12 @@ def get_point_cloud_info() -> dict:
     global _point_cloud_data, _point_cloud_info
 
     if not _point_cloud_info.get("loaded"):
-        return {"error": "未加载点云数据，请先调用 load_point_cloud"}
+        return create_error_response(IpcError.model_not_loaded())
 
     if _point_cloud_data is None:
-        return {"error": "点云数据为空"}
+        return create_error_response(
+            IpcError(ErrorCode.INTERNAL_ERROR, "点云数据为空")
+        )
 
     try:
         points = np.asarray(_point_cloud_data.points)
@@ -139,10 +158,12 @@ def get_point_cloud_info() -> dict:
             }
         }
 
-        return info
+        return create_success_response(info)
 
     except Exception as e:
-        return {"error": f"获取信息失败: {str(e)}"}
+        return create_error_response(
+            IpcError(ErrorCode.INTERNAL_ERROR, f"获取信息失败：{str(e)}")
+        )
 
 
 def downsample(voxel_size: float) -> dict:
@@ -154,13 +175,17 @@ def downsample(voxel_size: float) -> dict:
     global _point_cloud_data, _point_cloud_info
 
     if not _point_cloud_info.get("loaded"):
-        return {"error": "未加载点云数据，请先调用 load_point_cloud"}
+        return create_error_response(IpcError.model_not_loaded())
 
     if _point_cloud_data is None:
-        return {"error": "点云数据为空"}
+        return create_error_response(
+            IpcError(ErrorCode.INTERNAL_ERROR, "点云数据为空")
+        )
 
     if voxel_size <= 0:
-        return {"error": "体素大小必须大于 0"}
+        return create_error_response(
+            IpcError.parameter_out_of_range("voxel_size", voxel_size, min_val=0)
+        )
 
     try:
         # 执行降采样
@@ -175,18 +200,20 @@ def downsample(voxel_size: float) -> dict:
 
         np.save(_TEMP_PCD_PATH, np.asarray(_point_cloud_data.points))
 
-        return {
-            "message": f"降采样完成（体素大小: {voxel_size}）",
+        return create_success_response({
+            "message": f"降采样完成（体素大小：{voxel_size}）",
             "statistics": {
                 "original_points": original_points,
                 "new_points": new_points,
                 "reduction_rate": round(1 - new_points/original_points, 4) * 100,
                 "voxel_size": voxel_size
             }
-        }
+        })
 
     except Exception as e:
-        return {"error": f"降采样失败: {str(e)}"}
+        return create_error_response(
+            IpcError(ErrorCode.INTERNAL_ERROR, f"降采样失败：{str(e)}")
+        )
 
 
 def estimate_normals(k_neighbors: int) -> dict:
@@ -198,13 +225,17 @@ def estimate_normals(k_neighbors: int) -> dict:
     global _point_cloud_data, _point_cloud_info
 
     if not _point_cloud_info.get("loaded"):
-        return {"error": "未加载点云数据，请先调用 load_point_cloud"}
+        return create_error_response(IpcError.model_not_loaded())
 
     if _point_cloud_data is None:
-        return {"error": "点云数据为空"}
+        return create_error_response(
+            IpcError(ErrorCode.INTERNAL_ERROR, "点云数据为空")
+        )
 
     if k_neighbors < 3:
-        return {"error": "邻域点数必须大于等于 3"}
+        return create_error_response(
+            IpcError.parameter_out_of_range("k_neighbors", k_neighbors, min_val=3)
+        )
 
     try:
         # 执行法线估计
@@ -219,8 +250,8 @@ def estimate_normals(k_neighbors: int) -> dict:
         _point_cloud_info["normals_k_neighbors"] = k_neighbors
 
         normals = np.asarray(_point_cloud_data.normals)
-        return {
-            "message": f"法线估计完成（邻域点数: {k_neighbors}）",
+        return create_success_response({
+            "message": f"法线估计完成（邻域点数：{k_neighbors}）",
             "statistics": {
                 "k_neighbors": k_neighbors,
                 "normals_count": len(normals),
@@ -229,10 +260,12 @@ def estimate_normals(k_neighbors: int) -> dict:
                     "max": normals.max(axis=0).tolist()
                 }
             }
-        }
+        })
 
     except Exception as e:
-        return {"error": f"法线估计失败: {str(e)}"}
+        return create_error_response(
+            IpcError(ErrorCode.INTERNAL_ERROR, f"法线估计失败：{str(e)}")
+        )
 
 
 def remove_outliers(nb_neighbors: int, std_ratio: float) -> dict:
@@ -245,15 +278,21 @@ def remove_outliers(nb_neighbors: int, std_ratio: float) -> dict:
     global _point_cloud_data, _point_cloud_info
 
     if not _point_cloud_info.get("loaded"):
-        return {"error": "未加载点云数据，请先调用 load_point_cloud"}
+        return create_error_response(IpcError.model_not_loaded())
 
     if _point_cloud_data is None:
-        return {"error": "点云数据为空"}
+        return create_error_response(
+            IpcError(ErrorCode.INTERNAL_ERROR, "点云数据为空")
+        )
 
     if nb_neighbors < 1:
-        return {"error": "邻域点数必须大于 0"}
+        return create_error_response(
+            IpcError.parameter_out_of_range("nb_neighbors", nb_neighbors, min_val=1)
+        )
     if std_ratio <= 0:
-        return {"error": "标准差比率必须大于 0"}
+        return create_error_response(
+            IpcError.parameter_out_of_range("std_ratio", std_ratio, min_val=0)
+        )
 
     try:
         # 执行离群点移除
@@ -271,7 +310,7 @@ def remove_outliers(nb_neighbors: int, std_ratio: float) -> dict:
 
         np.save(_TEMP_PCD_PATH, np.asarray(_point_cloud_data.points))
 
-        return {
+        return create_success_response({
             "message": f"离群点移除完成",
             "statistics": {
                 "original_points": original_points,
@@ -283,10 +322,12 @@ def remove_outliers(nb_neighbors: int, std_ratio: float) -> dict:
                     "std_ratio": std_ratio
                 }
             }
-        }
+        })
 
     except Exception as e:
-        return {"error": f"离群点移除失败: {str(e)}"}
+        return create_error_response(
+            IpcError(ErrorCode.INTERNAL_ERROR, f"离群点移除失败：{str(e)}")
+        )
 
 
 def segment_plane(distance_threshold: float, max_iterations: int) -> dict:
@@ -299,15 +340,21 @@ def segment_plane(distance_threshold: float, max_iterations: int) -> dict:
     global _point_cloud_data, _point_cloud_info
 
     if not _point_cloud_info.get("loaded"):
-        return {"error": "未加载点云数据，请先调用 load_point_cloud"}
+        return create_error_response(IpcError.model_not_loaded())
 
     if _point_cloud_data is None:
-        return {"error": "点云数据为空"}
+        return create_error_response(
+            IpcError(ErrorCode.INTERNAL_ERROR, "点云数据为空")
+        )
 
     if distance_threshold <= 0:
-        return {"error": "距离阈值必须大于 0"}
+        return create_error_response(
+            IpcError.parameter_out_of_range("distance_threshold", distance_threshold, min_val=0)
+        )
     if max_iterations < 1:
-        return {"error": "最大迭代次数必须大于 0"}
+        return create_error_response(
+            IpcError.parameter_out_of_range("max_iterations", max_iterations, min_val=1)
+        )
 
     try:
         # 执行平面分割
@@ -318,11 +365,7 @@ def segment_plane(distance_threshold: float, max_iterations: int) -> dict:
         )
         [a, b, c, d] = plane_model
 
-        # 分离平面点云和非平面点云（保留原始点云，仅返回分割结果）
-        inlier_cloud = _point_cloud_data.select_by_index(inliers)
-        outlier_cloud = _point_cloud_data.select_by_index(inliers, invert=True)
-
-        return {
+        return create_success_response({
             "message": f"平面分割完成（RANSAC）",
             "plane_model": {
                 "equation": f"{a:.6f}x + {b:.6f}y + {c:.6f}z + {d:.6f} = 0",
@@ -335,10 +378,12 @@ def segment_plane(distance_threshold: float, max_iterations: int) -> dict:
                 "outlier_points": len(np.asarray(_point_cloud_data.points)) - len(inliers),
                 "inlier_ratio": round(len(inliers)/len(np.asarray(_point_cloud_data.points)) * 100, 2)
             }
-        }
+        })
 
     except Exception as e:
-        return {"error": f"平面分割失败: {str(e)}"}
+        return create_error_response(
+            IpcError(ErrorCode.INTERNAL_ERROR, f"平面分割失败：{str(e)}")
+        )
 
 
 def euclidean_clustering(
@@ -356,20 +401,32 @@ def euclidean_clustering(
     global _point_cloud_data, _point_cloud_info
 
     if not _point_cloud_info.get("loaded"):
-        return {"error": "未加载点云数据，请先调用 load_point_cloud"}
+        return create_error_response(IpcError.model_not_loaded())
 
     if _point_cloud_data is None:
-        return {"error": "点云数据为空"}
+        return create_error_response(
+            IpcError(ErrorCode.INTERNAL_ERROR, "点云数据为空")
+        )
 
     if tolerance <= 0:
-        return {"error": "聚类容差必须大于 0"}
+        return create_error_response(
+            IpcError.parameter_out_of_range("tolerance", tolerance, min_val=0)
+        )
     if min_cluster_size < 1:
-        return {"error": "最小簇大小必须大于 0"}
+        return create_error_response(
+            IpcError.parameter_out_of_range("min_cluster_size", min_cluster_size, min_val=1)
+        )
     if max_cluster_size < min_cluster_size:
-        return {"error": "最大簇大小必须大于等于最小簇大小"}
+        return create_error_response(
+            IpcError(
+                ErrorCode.INVALID_PARAMETER,
+                f"max_cluster_size ({max_cluster_size}) 必须大于等于 min_cluster_size ({min_cluster_size})",
+                {"min_cluster_size": min_cluster_size, "max_cluster_size": max_cluster_size}
+            )
+        )
 
     try:
-        # 构建 KD 树（加速近邻搜索）
+        # 构建 KD 树（加速邻域搜索）
         pcd_tree = o3d.geometry.KDTreeFlann(_point_cloud_data)
         # 执行 DBSCAN 聚类
         labels = np.array(_point_cloud_data.cluster_dbscan(
@@ -389,13 +446,13 @@ def euclidean_clustering(
                 clusters.append({
                     "cluster_id": i,
                     "size": cluster_size,
-                    "points_indices": cluster_points[:10].tolist()  # 仅返回前10个索引，避免数据过大
+                    "points_indices": cluster_points[:10].tolist()  # 仅返回前 10 个索引，避免数据过大
                 })
 
         # 统计离群点（标签为 -1）
         outliers = np.where(labels == -1)[0]
 
-        return {
+        return create_success_response({
             "message": f"欧式聚类完成（DBSCAN）",
             "parameters": {
                 "tolerance": tolerance,
@@ -409,11 +466,13 @@ def euclidean_clustering(
                 "largest_cluster_size": max([c["size"] for c in clusters]) if clusters else 0,
                 "smallest_cluster_size": min([c["size"] for c in clusters]) if clusters else 0
             },
-            "clusters": clusters[:10]  # 仅返回前10个簇，避免 JSON 过大
-        }
+            "clusters": clusters[:10]  # 仅返回前 10 个簇，避免 JSON 过大
+        })
 
     except Exception as e:
-        return {"error": f"欧式聚类失败: {str(e)}"}
+        return create_error_response(
+            IpcError(ErrorCode.INTERNAL_ERROR, f"欧式聚类失败：{str(e)}")
+        )
 
 
 def save_point_cloud(file_path: str) -> dict:
@@ -425,18 +484,24 @@ def save_point_cloud(file_path: str) -> dict:
     global _point_cloud_data, _point_cloud_info
 
     if not _point_cloud_info.get("loaded"):
-        return {"error": "未加载点云数据，请先调用 load_point_cloud"}
+        return create_error_response(IpcError.model_not_loaded())
 
     if _point_cloud_data is None:
-        return {"error": "点云数据为空"}
+        return create_error_response(
+            IpcError(ErrorCode.INTERNAL_ERROR, "点云数据为空")
+        )
 
     if not file_path:
-        return {"error": "文件路径不能为空"}
+        return create_error_response(
+            IpcError.missing_parameter("file_path")
+        )
 
     try:
         file_ext = file_path.split(".")[-1].lower()
         if file_ext not in ["pcd", "ply"]:
-            return {"error": f"不支持的保存格式: {file_ext}，仅支持 PCD/PLY"}
+            return create_error_response(
+                IpcError.file_format_unsupported(file_ext)
+            )
 
         # 创建输出目录（如果不存在）
         output_dir = os.path.dirname(file_path)
@@ -446,23 +511,27 @@ def save_point_cloud(file_path: str) -> dict:
         # 保存点云
         success = o3d.io.write_point_cloud(file_path, _point_cloud_data)
         if not success:
-            return {"error": "保存失败，未知原因"}
+            return create_error_response(
+                IpcError(ErrorCode.FILE_WRITE_ERROR, "保存失败，未知原因")
+            )
 
         # 获取文件大小
         file_size = os.path.getsize(file_path) / 1024 / 1024  # MB
 
-        return {
-            "message": f"点云保存成功: {file_path}",
+        return create_success_response({
+            "message": f"点云保存成功：{file_path}",
             "info": {
                 "file_path": file_path,
                 "format": file_ext.upper(),
                 "file_size_mb": round(file_size, 2),
                 "num_points": len(np.asarray(_point_cloud_data.points))
             }
-        }
+        })
 
     except Exception as e:
-        return {"error": f"保存失败: {str(e)}"}
+        return create_error_response(
+            IpcError(ErrorCode.FILE_WRITE_ERROR, f"保存失败：{str(e)}")
+        )
 
 
 def visualize() -> dict:
@@ -473,17 +542,19 @@ def visualize() -> dict:
     global _point_cloud_data, _point_cloud_info
 
     if not _point_cloud_info.get("loaded"):
-        return {"error": "未加载点云数据，请先调用 load_point_cloud"}
+        return create_error_response(IpcError.model_not_loaded())
 
     if _point_cloud_data is None:
-        return {"error": "点云数据为空"}
+        return create_error_response(
+            IpcError(ErrorCode.INTERNAL_ERROR, "点云数据为空")
+        )
 
     try:
         # 创建可视化窗口（非阻塞模式，支持交互）
         vis = o3d.visualization.Visualizer()
         vis.create_window(window_name="Lidar AI Studio - 点云可视化", width=1280, height=720)
         vis.add_geometry(_point_cloud_data)
-        
+
         # 设置背景色和渲染参数
         opt = vis.get_render_option()
         opt.background_color = np.asarray([0.05, 0.05, 0.05])  # 深灰色背景
@@ -495,13 +566,15 @@ def visualize() -> dict:
         vis.run()
         vis.destroy_window()
 
-        return {
+        return create_success_response({
             "message": "可视化窗口已关闭",
             "note": "支持鼠标交互：左键旋转，右键平移，滚轮缩放"
-        }
+        })
 
     except Exception as e:
-        return {"error": f"可视化失败: {str(e)}"}
+        return create_error_response(
+            IpcError(ErrorCode.INTERNAL_ERROR, f"可视化失败：{str(e)}")
+        )
 
 
 # 工具注册表（AI 调度层可见的工具定义）
@@ -643,22 +716,30 @@ def handle_request(request: dict) -> dict:
     """
     处理单个 IPC 请求
     :param request: 从 Rust 接收的 JSON 请求（{"tool": "工具名", "args": {"参数": 值}}）
-    :return: JSON 响应（{"result": 结果, "error": 错误信息}）
+    :return: JSON 响应（{"result": 结果，"error": 错误信息}）
     """
     tool_name = request.get("tool")
     args = request.get("args", {})
-    
+
     if tool_name not in TOOLS:
-        return {"result": None, "error": f"未知工具：{tool_name}，可用工具：{list(TOOLS.keys())}"}
-    
+        return create_error_response(IpcError.tool_not_found(tool_name))
+
     try:
         func = TOOLS[tool_name]["func"]
         result = func(**args)
-        return {"result": result, "error": None}
+        return result  # func 已经返回正确的格式
     except TypeError as e:
-        return {"result": None, "error": f"参数错误：{str(e)}，请检查参数类型和必填项"}
+        return create_error_response(
+            IpcError(
+                ErrorCode.INVALID_PARAMETER,
+                f"参数错误：{str(e)}，请检查参数类型和必填项",
+                {"exception": str(e)}
+            )
+        )
     except Exception as e:
-        return {"result": None, "error": f"工具执行失败：{str(e)}"}
+        return create_error_response(
+            IpcError(ErrorCode.INTERNAL_ERROR, f"工具执行失败：{str(e)}")
+        )
 
 
 def main():
@@ -668,23 +749,33 @@ def main():
     """
     # 设置 numpy 浮点精度，避免 JSON 序列化问题
     np.set_printoptions(precision=6, suppress=True)
-    
+
     # 逐行读取 stdin（每行一个 JSON 请求）
     for line in sys.stdin:
         line = line.strip()
         if not line:
             continue
-        
+
         try:
             # 解析请求
             request = json.loads(line)
             # 处理请求
             response = handle_request(request)
         except json.JSONDecodeError as e:
-            response = {"result": None, "error": f"无效 JSON 格式：{str(e)}"}
+            response = create_error_response(
+                IpcError(
+                    ErrorCode.INVALID_REQUEST,
+                    f"无效 JSON 格式：{str(e)}"
+                )
+            )
         except Exception as e:
-            response = {"result": None, "error": f"处理请求时发生意外错误：{str(e)}"}
-        
+            response = create_error_response(
+                IpcError(
+                    ErrorCode.INTERNAL_ERROR,
+                    f"处理请求时发生意外错误：{str(e)}"
+                )
+            )
+
         # 输出响应（强制刷新 stdout，确保 Rust 能立即接收）
         print(json.dumps(response, ensure_ascii=False), flush=True)
 
@@ -696,19 +787,23 @@ if __name__ == "__main__":
         test_file = "test.ply"  # 替换为你的测试点云路径
         print("=== 本地测试模式 ===")
         print(f"1. 加载点云：{test_file}")
-        print(json.dumps(load_point_cloud(test_file), indent=2, ensure_ascii=False))
-        
-        print("\n2. 获取点云信息")
-        print(json.dumps(get_point_cloud_info(), indent=2, ensure_ascii=False))
-        
-        print("\n3. 降采样（voxel_size=0.05）")
-        print(json.dumps(downsample(0.05), indent=2, ensure_ascii=False))
-        
-        print("\n4. 法线估计（k_neighbors=20）")
-        print(json.dumps(estimate_normals(20), indent=2, ensure_ascii=False))
-        
-        print("\n5. 保存点云（test_output.pcd）")
-        print(json.dumps(save_point_cloud("test_output.pcd"), indent=2, ensure_ascii=False))
+        result = load_point_cloud(test_file)
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+
+        if result.get("error") is None:
+            print("\n2. 获取点云信息")
+            print(json.dumps(get_point_cloud_info(), indent=2, ensure_ascii=False))
+
+            print("\n3. 降采样（voxel_size=0.05）")
+            print(json.dumps(downsample(0.05), indent=2, ensure_ascii=False))
+
+            print("\n4. 法线估计（k_neighbors=20）")
+            print(json.dumps(estimate_normals(20), indent=2, ensure_ascii=False))
+
+            print("\n5. 保存点云（test_output.pcd）")
+            print(json.dumps(save_point_cloud("test_output.pcd"), indent=2, ensure_ascii=False))
+        else:
+            print(f"\n⚠ 加载失败，跳过后续测试：{result['error']}")
     else:
         # IPC 通信模式
         main()
